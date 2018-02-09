@@ -1,0 +1,546 @@
+---
+title: "Lab 4"
+author: "Shan He, Joanna Huang, Tiffany Jaya"
+date: "17 December 2017"
+output: pdf_document
+---
+
+```{r echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(car) # scatterplotMatrix
+library(ggplot2) # ggplot
+library(lmtest) # bptest
+library(moments) # skewness
+library(outliers) # outlier
+library(tidyr) # gather
+library(stargazer) # stargazer for regression table
+library(lmtest) # coefficient hypothesis test 
+library(sandwich) # vcovHC heteroskedasticity-robust standard error
+library(stargazer) # stargazer
+# prevent scientific notation, specifically used in outliers package
+options(scipen=999)
+```
+
+# Introduction
+
+This year, on October 18, 2017, Law Enforcement Leaders urged Attorney General Jeff Sessions to reconsider his stance on reverting back to "overly punitive" approaches of the 1980s and 1990s to reduce crime. Since President Trump believes that America is in the midst of a national crime wave, Sessions thought a more conservative approach of deterrence through arrests, incapacitation through imprisonment, harsh sentencing and higher police per capita would lead to lower crime rates overall. However, police chiefs who have first hand decades of experience on the front lines learned that these tactics are ineffective to reduce crime. 
+
+In this paper, we will explore whether the conservative approach to crime effectively reduce crime rates. We began by exploring North Carolina's crime dataset of 1988 when "overly punitive" approaches of the 1980s and 1990s would have taken place and analyzed the determinants of crime based on the research question: Does the conservative approach of deterrence through arrests, incapacitation through imprisonment, harsh sentencing and higher police per capita lead to lower crime rates? We will list out the limitations of our analysis, including any estimates that suffer from endogeneity bias, and generate policy suggestions based on our findings.
+
+# Exploratory Data Analysis
+
+```{r}
+# load the data
+data <- read.csv("crime_v2_updated.csv")
+# verify that it only contains data from 1988
+unique(data$year)
+# list number of counties
+length(unique(data$county))
+# list number of western, central, and urban counties
+c(sum(data$west == 1), sum(data$central == 1), sum(data$urban == 1))
+# list number of western & urban counties and central & urban counties
+c(sum(data$west == 1 & data$urban == 1), sum(data$central == 1 & data$urban == 1))
+# verify number of missing values
+colSums(sapply(data, is.na))
+```
+
+The dataset contains 90 counties from North Carolina, all of which is collected in 1988. Out of the 90 counties, 34 are from western NC (out of which 5 is also urban), 21 are from central NC (out of which 1 is also urban), and 8 are considered urban counties. There are no missing values which will make our analysis easier.
+
+```{r}
+summary(data)
+```
+
+Most of the variables appear to be within a reasonable range, except for $probarr$ and $probconv$, which have probability values greater than 1. 
+
+```{r}
+# list number of probabilities (probarr, probconv, probsen, mix) that are not in range [0, 1]
+c(sum(data$probarr < 0 | 1 < data$probarr), sum(data$probconv < 0 | 1 < data$probconv),
+  sum(data$probsen < 0 | 1 < data$probsen), sum(data$mix < 0 | 1 < data$mix))
+```
+
+$probconv$ and $probsen$ contain 10 and 1 datapoints respectively that do not conform to the probability assumption. We will take these outliers into consideration when choosing variables for our models.
+
+We then plot each numeric variable in a histogram to see its sample distribution.
+
+```{r message=FALSE}
+# plot every variable except X, county, year, west, central, urban
+num.data <- data[!(names(data) %in% c("X", "county", "year", "west", "central", "urban"))]
+ggplot(gather(num.data), aes(value)) +
+       facet_wrap(~key, scales="free") +
+       geom_histogram()
+```
+
+```{r}
+skewness(num.data)
+```
+
+Most of the sample distributions appear to be positively skewed. When choosing the variables for our regression models, we will consider logarithmic transformations if the interpretations make sense.
+
+From the histograms, we also see several notable outliers. We are under the impression that a county which has an outlier in one variable will likely have an outlier in another variable. For this reason, we have listed counties which have repeated outliers when we iterate through the entire numeric variables.
+
+```{r}
+# iterate through each numeric variable and list the outlier counties and their respective frequency
+county.ids <- c()
+for(var in num.data) {
+  var.out <- boxplot.stats(var)$out
+  county.ids <- c(county.ids, data[var %in% var.out, ]$county)
+}
+table(county.ids)
+```
+```{r}
+# list the most extreme outlier
+outlier(num.data)
+```
+
+One outlier that is interesting to note is the weekly wage in the service industry for county with id 185,  \$2177.10. 
+
+```{r}
+summary(data$wageser)
+```
+
+It is approximately eight times higher than the median. We do not know if the value is inputted incorrectly or if the county in general is making a weekly wage of \$2177.10 in the service industry.
+
+# Research Question
+
+James Q. Wilson and George Kelling's "broken windows theory" in 1982 led to a nation-wide movement for stricter crime-fighting policies between the 1980s and 1990s. The theory states:  
+
+> *if the first broken window in a building is not repaired, then people*
+> *who like breaking windows will assume that no one cares about the*
+> *building and more windows will be broken. Soon the building will have*
+> *no windows....*
+
+The belief was that by adopting a zero tolerance approach that enforced even the lowest level offenses, crime rates would subsequently go down. While New York City notably enforced this more stringent approach, San Francisco went the opposite direction of less strident law enforcement policies that reduced arrests, prosecutions and incarceration rates. Both sides experienced considerable declines in crime rates. Thus we hope to test the "broken windows theory" for the counties of South Carolina in 1987 and answer the question: Does the conservative approach of deterrence through arrests, incapacitation through imprisonment, harsh sentencing and higher police per capita lead to lower crime rates?
+
+# Model 1: only the explanatory variables of key interest
+
+Based on the research question, our initial proposed model will include $crime$ as the dependent variable and all variables related to stricter law enforcement policies: $probarr$, $probconv$, $probsen$, $avgsen$, and $police$ as independent variables. Assuming the "broken windows theory" is valid, we expect generally negative coefficients for all variables.
+
+Given that the histogram of $crime$ has a significant positive skew, we noted a log transformation may be suitable since its values are non-zero and positive. The same can be said about the independent variable $police$ where its histogram is positively skewed and its values are non-zero and positive.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# before and after log transformation
+hist(data$crime); hist(log(data$crime))
+hist(data$police); hist(log(data$police))
+```
+
+Though $probarr$, $probconv$, and $probsen$ are positively skewed as well, we decided against taking the log of these variables because log transformations can make values between 0 and 1 more extreme. We also kept $avgsen$ as is for easier interpretation. 
+
+Next, we want to check the relationships between the chosen independent variables and our dependent variable, before and after transformations. We want to ensure that we did not deviate any straight-line relationships between the independent variables and the dependent variable using the transformation.
+
+```{r}
+scatterplotMatrix(~ crime + log(crime) + 
+                    probarr + probconv + probsen + avgsen + police + log(police), data = data)
+```
+
+As we can see from the scatterplot matrix, it does not appear that the transformation drastically changed the relationship.
+
+Lastly, based on the exploratory data analysis, we should be careful when considering $probconv$ and $probsen$ as variables in the model with 10 and 1 datapoints respectively that have probabilties greater than 1. $probconv$ is proxied by the ratio of convictions to arrest while $probsen$ is proxied by the proportion of total convictions resulting in prison sentences. Although it is unlikely that an individual can be convicted without an arrest or sentenced without a conviction, we cannot rule out the possibility. Both of these variables are important in answering our research question and removing them will result in an omitted variable bias as we will demonstrate below. 
+
+Assuming we started out with a base model without $probconv$ and $probsen$, we wanted to see what effects $probconv$ and $probsen$ respectively have on the other explanatory variables when we add them individually to the base model. We looked at the printout of their respective model coefficients to understand the effects. Based on the research question, we expect that higher conviction and higher sentencing will result in lower crime rate. And since the relationship of $probconv$ and $probsen$ are positive with the other explanatory variables as demonstrated by the correlation matrix, we expect negative bias overall.  
+
+```{r}
+# demonstrate that probconv and probsen individually have positive relationship 
+# with the other explanatory variables: probarr, avgsen, police
+ind.vars <- subset(data, select= c("probarr", "probconv", "probsen", "avgsen", "police"))
+cor(ind.vars, ind.vars)
+```
+
+```{r}
+# test omitted variable bias by first creating a base model and a model for each omitted variable
+m1.base <- lm(crime ~ probarr + avgsen + police, data=data)
+m1.probconv <- lm(crime ~ probarr + probconv + avgsen + police, data=data)
+m1.probsen <- lm(crime ~ probarr + probsen + avgsen + police, data=data)
+# print out the model coefficients
+(coef.base <- coeftest(m1.base, vcov=vcovHC))
+(coef.probconv <- coeftest(m1.probconv, vcov=vcovHC))
+(coef.probsen <- coeftest(m1.probsen, vcov=vcovHC))
+```
+
+Looking at the coefficients, it does appear that higher conviction ($probconv$) and higher sentencing ($probsen$) result in lower crime rate ($crime$) as seen by their negative sign in their respective coefficient. We also note that $probconv$ and $probsen$ are statistically significant when added to the base model. It appears that there is a negative omitted variable bias. For this reason, it would be best to include $probconv$ and $probsen$ in our Model 1 proposal.
+
+As we will later discuss in section "Discussion of Causality", if the outliers happen to be a measurement error, it will result in our model being confounded by bias. Although that might be the case, there is also a likelihood that the measurement is valid, and we have demonstrated that not including $probconv$ and $probsen$ will most likely confound our model with omitted variable bias.
+
+Hence, we propose our first model as follows which contains all explanatory variables of key interest:
+
+$$ log(crime) = \beta_0 + \beta_1 \cdot probarr + \beta_2 \cdot probconv + \beta_3 \cdot probsen + \beta_4 \cdot avgsen + \beta_5 \cdot log(police) + u $$
+
+We will now run the model and test the validity of the 6 CLM assumptions to ensure that the OLS estimators are consistent, normally distributed, and BLUE (best linear unbiased estimator).
+
+```{r}
+m1 <- lm(log(crime) ~ probarr + probconv + probsen + avgsen + log(police), data=data)
+```
+
+## CLM 1 - A linear model
+
+The model is specified such that the dependent variable is a linear function of the explanatory variables. As shown in the scatterplot matrix above, all of the dependent variables in the model seem to have a linear relationship with the independent variable $log(crime)$. We can verify further the linearity of the relationship using either component+residual plots (also called partial-residual plots) or the CERES plots. We have decided to do the former and note that for the most part, the relationships appear linear.
+
+```{r}
+# verify linearity of relationships using component+residual plots
+crPlots(m1)
+```
+
+## CLM 2 - Random Sampling
+
+We do not know how the survey is collected. We assume that the variables are representative of the entire population distribution since the counties are subsets of North Carolina. There is nothing we can do to correct this, so we note this as a potential weakness in the analysis. 
+
+## CLM 3 - Multicollinearity
+
+As a quick test of the multicollinearity condition, we check the correlation of the explanatory variables and their Variance Inflation Factors (VIF):
+
+```{r}
+# correlation matrix of explanatory variables
+data$log.police <- log(data$police)
+cor(data.matrix(subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "police", "log.police"))))
+# verify VIFs are less than 10
+vif(m1)
+```
+
+The explanatory variables ($probarr$, $probconv$, $prbpis$, $avgsen$, $log.police$) are not perfectly correlated and the VIFs are low (i.e. less than 10), so there is no perfect multicollinearity of the independent variables.
+
+## CLM 4 – Zero-Conditional Mean
+
+To see whether there is a zero-conditional mean across all x’s, we will plot the residuals against the fitted values.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# plot residual vs fitted plot & residual vs leverage plot
+plot(m1, which=c(1, 5))
+```
+
+The residual vs fitted plot indicates little evidence that the zero-conditional mean assumption does not hold since the red spline line remains close to zero despite its slight dip and rise at both ends due to fewer observations.
+
+Furthermore, it does not appear that the outliers have undue influence on the model fit. Based on the residual vs leverage plot, none of the outliers have a leverage that exceeds a Cook's distance of 1 on the regression model. 
+
+We have also taken a look at the covariances of the independent variables with the residuals to see if the variables we chose are likely to be exogenous. 
+
+```{r}
+# calculate the covariance for each independent variables with the model's residuals
+lapply(subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police")),  
+      function(var) cov(var, m1$residuals))
+```
+
+The covariances are very close to zero indicating the likelihood of being exogenous. 
+
+Because of the substantial sample size and the results of the verifications we have performed above, there is little evidence that the zero-conditional mean assumption is invalid.
+
+## CLM 5 - Homoscedasticity
+
+To determine whether the variance of $u$ is fixed for all x’s, we look at the scale-location plot to see if residuals are spread equally along the ranges of the explanatory variables.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# plot scale-location plot
+plot(m1, which=3)
+```
+The residuals appear randomly spread; therefore we can assume that the variance is equal. 
+
+To further verify this assumption, we run Breusch-Pagan and the Score-test for non-constant error variance.
+
+```{r}
+# Breusch-pagan test
+bptest(m1)
+```
+
+The Breusch-pagan test validates our assumption of homoskedasticity. Since the p-value is statistically not significant, we cannot reject the null hyothesis of homoskedasticity.
+
+```{r}
+# Score-test for non-constant error variance
+ncvTest(m1)
+```
+
+The Score-test also validates this assumption. Since the p-value is statistically not significant, we cannot reject the null hypothesis of constant error variance. 
+
+For this reason, the assumption of homoskedasticity is met. 
+
+##CLM 6 – Normality of residuals
+
+To determine whether there is normality of the residuals, we looked at the histogram and the Q-Q plot of the residuals and visually observe whether there is normality.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# normality of standard residuals
+rstnd = rstandard(m1)
+hist(rstnd, main="Histogram standard residuals", breaks=50, freq=FALSE)
+curve(dnorm(x, mean=0, sd=sd(rstnd)), col="red", lwd=2, add=TRUE)
+# normality of studentized residuals
+rstud = rstudent(m1)
+hist(rstud, main="Histogram studentized residuals", breaks=50, freq=FALSE)
+curve(dnorm(x, mean=0, sd=1), col="red", lwd=2, add=TRUE)
+# Q-Q plot standard residuals
+qqPlot(rstnd, distribution="norm", pch=20, main="Q-Q Plot standard residuals")
+qqline(rstnd, col="red", lwd=2)
+# Q-Q plot studentized residuals
+qqPlot(rstud, distribution="norm", pch=20, main="Q-Q Plot studentized residuals")
+qqline(rstud, col="red", lwd=2)
+```
+
+The histograms appear to be negatively skewed. The Q-Q plots further supports it with a fat negative tail. 
+```{r}
+#check sample size for model 1
+nobs(m1)
+```
+
+Although the assumption is not met, given the substantial sample size, we can be confident that due to OLS asymptotics the distribution of the residuals will be approximately normal. 
+
+Since all six assumptions of the Classical Linear Model are met, we can assume that the OLS estimators are consistent, normally distributed and BLUE.
+
+# Model 2: add covariates that increase accuracy without bias
+
+For Model 2, we decided to include variables that have an indirect impact to crime rate: $density$, $tax$, and $mix$. 
+
+We chose $density$ based on the theory that the more densely populated an area is, the harder it is for individuals to commit crime, which in turn decreases the crime rate. We assumed that if we included $density$ on top of Model 1, its coefficient will be positive since it has a negative relationship with $crime$ and a negative relationship with most of the explanatory variables except $police$ as shown below. Our thought process goes as follows: because we assume that densely populated area will lower crime rate, it will lower the probability of arrest, conviction and prison sentence and therefore have a negative relationship with them. On the other hand, we assume that an increased number of people per capita will reflect an increased number of police per capita and therefore $density$ will have a positive relationship with $police$.
+
+```{r}
+# list the correlation between density and model 1's explanatory variables
+cor(subset(data, select="density"), subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police")))
+```
+
+The correlation matrix confirms our assumptions.
+
+Since $density$ is positively skewed, it will benefit with a log transformation because its values are non-zero and positive.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# before and after log transformation
+hist(data$density); hist(log(data$density))
+```
+
+Although $density$ has a direct relationship with $urban$, we decided not to include $urban$ because there are other factors, such as wage discrepancy between the wealthy and the poor that can potentially exist in urban counties which the current dataset does not support. In other words, by including $urban$, we might fall prey to the omitted variable bias because there are potentially multiple variables that influence $urban$ which are not available in our current dataset.
+
+We chose tax revenue per capita, $tax$, on a similar basis as $density$ in that higher tax revenue usually equates to more funding for protection services and therefore lowers the rate of crime. $tax$ also has a negative relationship with $crime$ and a negative relationship with most of the explanatory variables in Model 1 except for $police$, which we assume will reflect in its coefficients being positive. Again, our reasonings are similar to $density$ in that the more money a county has to pay for protection services, such as police, the less likely an individual will commit crime and therefore the lower the probability of arrest, conviction and sentencing is in that county. 
+
+```{r}
+# list the correlation between tax and model 1's explanatory variables
+cor(subset(data, select="tax"), subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police")))
+```
+
+The correlatin matrix again confirms our assumptions. 
+
+$tax$ can also benefit with a log transformation because its distribution is skewed and its values are non-zero and positive.
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# before and after log transformation
+hist(data$tax); hist(log(data$tax))
+```
+
+Lastly, we chose $mix$ as an indirect effect to $crime$ because we are under the impression that the $mix$ variable which reflects the ratio of face-to-face crime over all other crimes is a good indicator of violent crimes, and violent crimes have a direct impact to the average sentence a criminal will receive. We understand that it most likely has an effect on $probsen$ and $avgsen$ but we do not know what type of relationship it has. For this reason, we list the correlation between $mix$ and the explanatory variables of Model 1 to get a better understanding.
+
+```{r}
+# list the correlation between mix and model 1's explanatory variables
+cor(subset(data, select="mix"), subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police")))
+```
+
+Although $mix$ is positively skewed as well, we decided against taking the log transformation of $mix$ because it can makes its values between 0 and 1 more extreme.
+
+Before we propose our second model, we would like to discuss the reasons why we decided not to include the other variables as covariates in Model 2. 
+
+Neighborhood plays a central role in fostering the tendency of a person commiting a crime. Although we are given geographic locations such as $west$ and $central$ and neither $west$ nor $central$, it does not inform us whether those counties are considered safe or unsafe. Knowing that a county has an unsafe rating can give us a better picture of crime rates in those neighborhoods. Also, just having geographic locations do not inform us about laws enacted for safety in those particular regions. We will never know, for example, if counties in western region enact stricter law than those in the central region. For this reason, we did not consider $west$ and $central$ as variables in Model 2.
+
+In addition, including $ymale$ and $pctmin$ will introduce omitted variable bias in Model 2 because typically a county that has low education, high percentage of young male, and high percentage of minority will induce a high crime rate. Education plays a critical role when taking into consideration $ymale$ and $pctmin$, and including $ymale$ and $pctmin$ without the education variable will open up to bias in the model. 
+
+Although wage is a good determinant of crime because those who are poor have a higher propensity to commit crime out of financial needs, the groupings of the wage variables do not provide us insight as to the different financial groups between the poor, the middle class, and the wealthy. For example, service industry is mostly thought of as jobs with a high number of minimum wage workers, but as the outlier points out in $wageser$, it might be possible for someone to work in the service industry and earn a well-off paycheck if they worked, for example, in a five star hotel. Transportation industry can also be considered as mostly jobs with high number of minimum wage workers, but again, a pilot works in the transportation industry and gets paid well. It is for this reason that we did not include the wage variables in the model.
+
+Hence, we can propose our second model as follows with all the indirect variables included and test the validity of the 6 CLM assumptions:
+
+$$ log(crime) = \beta_0 + \beta_1 \cdot probarr + \beta_2 \cdot probconv + \beta_3 \cdot probsen + \beta_4 \cdot avgsen + \beta_5 \cdot log(police) + \beta_6 \cdot log(density) + \beta_7 \cdot log(tax) + \beta_8 \cdot mix u $$
+
+```{r}
+m2 <- lm(log(crime) ~ probarr + probconv + probsen + avgsen + log(police) + log(density) + log(tax) + mix, data=data)
+```
+
+## CLM 1 - A linear model
+
+The model is specified such that the dependent variable is a linear function of the explanatory variables. We can quickly verify this using the component+residual plots.
+
+```{r}
+# verify linearity of relationships using component+residual plots
+crPlots(m2)
+```
+
+For the most part, the variables appear linear.
+
+## CLM 2 - Random Sampling
+
+As discussed in Model 1, we do not know how the survey is collected, but we assume that the variables are representative of the entire population distribution.
+
+## CLM 3 - Multicollinearity
+
+```{r}
+# correlation matrix of explanatory variables
+data$log.density <-log(data$density)
+data$log.tax <- log(data$tax)
+cor(data.matrix(subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police", "log.density", "log.tax", "mix"))))
+# verify VIFs are less than 10
+vif(m2)
+```
+
+The variables are not perfectly correlated and the VIFs are low, so there is no perfect multicollinearity of the independent variables.
+
+## CLM 4 - Zero-Conditional Mean
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# plot residual vs fitted plot & residual vs leverage plot
+plot(m2, which=c(1, 5))
+# calculate the covariance for each independent variables with the model's residuals
+lapply(subset(data, select=c("probarr", "probconv", "probsen", "avgsen", "log.police", "log.density", "log.tax", "mix")),  
+      function(var) cov(var, m1$residuals))
+```
+
+Zero-conditional mean assumption holds because the spline line remains close to zero in the residual vs fitted plot, there is no outliers that have high influence, and the covariances are very close to zero indicating the likelihood of being exogenous. 
+
+## CLM 5 - Homoscedasticity
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# plot scale-location plot
+plot(m1, which=3)
+# Breusch-pagan test
+bptest(m1)
+# Score-test for non-constant error variance
+ncvTest(m1)
+```
+
+The assumption of homoskedasticity is met because the residuals appear randomly spread in the scale-location plot, and the p-value is statistically not significant in both Breusch-pagan and Score-test.
+
+## CLM 6 - Normality of residuals
+
+```{r out.width="49%", fig.align="center", fig.show="hold"}
+# normality of standard residuals
+rstnd = rstandard(m2)
+hist(rstnd, main="Histogram standard residuals", breaks=50, freq=FALSE)
+curve(dnorm(x, mean=0, sd=sd(rstnd)), col="red", lwd=2, add=TRUE)
+# normality of studentized residuals
+rstud = rstudent(m2)
+hist(rstud, main="Histogram studentized residuals", breaks=50, freq=FALSE)
+curve(dnorm(x, mean=0, sd=1), col="red", lwd=2, add=TRUE)
+# Q-Q plot standard residuals
+qqPlot(rstnd, distribution="norm", pch=20, main="Q-Q Plot standard residuals")
+qqline(rstnd, col="red", lwd=2)
+# Q-Q plot studentized residuals
+qqPlot(rstud, distribution="norm", pch=20, main="Q-Q Plot studentized residuals")
+qqline(rstud, col="red", lwd=2)
+# check sample size for model 2
+nobs(m2)
+```
+
+Although the assumption is not met, given the substantial sample size, we can be confident that due to OLSasymptotics the distribution of the residuals will be approximately normal.
+
+Since all six assumptions of the Classical Linear Model are met, we can assume that the OLS estimators areconsistent, normally distributed and BLUE.
+
+# Model 3: most, if not all, other covariates
+
+In Model 3, we are going to include more variables from the dataset to try to control effects the other variables have on our dependent variable. Although this model might introduce more noises as it becomes over-specified, it will be able to explain more of the variances in the dependent variable than the previous models. 
+
+```{r}
+# EDA for variables that aren't in model 1 or 2
+summary(data[(names(data) %in% c("west", "central", "urban", "wagecon", "wagetuc", "wagetrd", "wagefir", "wageser", "wagemfg", "wagefed", "wagesta", "wageloc", "pctmin", "ymle"))])
+```
+Looking at the summary, every variable seems to be in an expected range except for the outlier 2177.1 in $wageser$. 
+
+```{r}
+# Look into wageser with an unusual max of 2177.1
+boxplot(data$wageser)
+```
+2177.1 is clearly an outlier in the data and could be possibly due to a measurement error. In this case, we decide not to include this $wageser$ to avoid confounding bias caused by potentially inaccurate data. 
+
+Moreover, let's look at how $west$ and $central$ distribute in the sample
+```{r}
+unique(cbind(data$west, data$central))
+```
+Note that although we don't have any counties that are both in west and central, as expected, we see some counties that are neither in west or central. In order to consider the effect of different regions, we will need to use both indicator variables in our model. 
+
+Out of all the variables that aren't included in Model 1 or Model 2, we have decided to include:
+1) $west$ & $central$, as indicator variables, to control for the regional effect on crime rate
+2) $urban$, as an indicator variable, to control for the non-density impact of urbanization on crime crate
+3) $wagecon$, $wagetuc$, $wagetrd$, $wagefir$, $wageser$, $wagemfg$, $wagefed$, $wagesta$, $wageloc$ to control for the effects of wages in different industries have on our crime rate
+4) $pctmin$ and $ymale$ to control for the demographic effect on crime rate 
+
+Now let's look the relationship between the selected variables and our dependent variable $log(crime)$
+```{r}
+scatterplotMatrix(~ log(crime) + wagecon + wagetuc + wagetrd + wagefir, data = data)
+scatterplotMatrix(~ log(crime) + wagemfg + wagefed + wagesta + wageloc, data = data)
+scatterplotMatrix(~ log(crime) + pctmin + ymale, data = data)
+```
+
+None of the variables shows strong evidence of non-linear relationship with the dependent variable $log(crmrte)$. 
+
+We notice that the distributions for the variables $wagecon$, $wagetrd$, $wagefir$, $wagemfg$, $wagesta$, and $wageloc$ are positively skewed, since they are all postive values, we can apply log transformations to all of them. For the ease of the intepretation of the model, we apply log tranformation to the other wage related variable $wagetuc$ as well.
+
+Although $ymale$ is also positively skewed and could benefit from a log transformation in terms of normality, it's hard to interpret the slope parameter of its log transformation. Hence, we decided to leave it as it is. 
+
+Let's double check the linearity of the relationship between our transformed variables and our dependent variable $log(crime)$
+```{r}
+scatterplotMatrix(~ log(crime) + log(wagecon) + log(wagetuc) + log(wagetrd) + log(wagefir), data = data)
+scatterplotMatrix(~ log(crime) + log(wagemfg) + log(wagefed) + log(wagesta) + log(wageloc), data = data)
+scatterplotMatrix(~ log(crime) + pctmin + ymale, data = data)
+```
+
+We didn't see any strong violation agaisnt the linearity of the relationships. Hence, we will propose the following model:
+
+```{r}
+m3 <- lm(log(crime) ~ probarr + probconv + probsen + avgsen + log(police) + log(density) + log(tax) + mix + west + central + urban + log(wagecon) + log(wagetuc) + log(wagetrd) + log(wagefir) + log(wagemfg) + log(wagefed) + log(wagesta) + log(wageloc) + ymale + pctmin, data=data)
+```
+
+```{r}
+plot(m3)
+bptest(m3)
+```
+
+Similar to Model 1, Model 3 shows 1) no strong violation of zero-conditional mean, according to the Residuals vs Fitted plot, 2) has no outlier with large influence and 3) shows skewedness in the QQ plot for the residuals. However, Model 3 shows a violation of homoskedasticity according to both the Residuals vs Fitted and the Scale-Location plots. 
+
+In response, just like what we normally would have done to be conservative, we will use the heteroskedasticity-robust standard errors for the hypothesis tests on the slope parameters. 
+
+One typical concern when including variables that tend to be highly correlated, like wages, is that the multi-collinearity will inflate the variance of the OLS estimated parameters. And to investigate this, we compute the variance inflation factos (vif) of each variable in the model:
+```{r}
+vif(m3)
+```
+Looking at the variance inflation factors, we don't see any variable with high (>10) vif, meaning that we don't have high multi-collinearity in our model.
+
+Next, we can use the heteroskedasticity-robust standard errors to perform t-tests on our estimated parameters:
+```{r}
+#compute standard errors for model 3 for regression table
+(se.m3 = sqrt(diag(vcovHC(m3))))
+
+# We pass the standard errors into stargazer through 
+# the se argument.
+stargazer(m3, type = "text", omit.stat = "f",
+          se = list(se.m3),
+          star.cutoffs = c(0.05, 0.01, 0.001))
+``` 
+
+According to the hypothesis tests using the heteroskedasticity-robust standard errors, we can see that variables $probconv$, $probsen$, $log(density)$ show strong statistical significance (p-value < 0.001), same with $log(police)$, $pctmin$ (p-value < 0.01) and $west$ (p-value < 0.05).
+
+Moreover, to interpret the estimed parameters for:
+1) $probconv$: keeping all other variables constant, a 0.1 increase in $probconv$ results in a 5.81% decrease in crime rate
+2) $probsen$: keeping all other variables constant, a 0.1 increase in $probsen$ results in a 15.78% decrease in crime rate
+5) $log(density)$: keeping all other variables constant, an 1% increase in density increases crime rate by 0.27%
+7) $log(police)$:  keeping all other variables constant, an 1% increase in police per captipa increases crime rate by 0.49%
+6) $pctmin$: keeping all other variables constant, a 1 increase in $pctmin$ increases crime rate by 0.18%
+3) $west$: keeping all other variables constant, being in west region decreases crime rate by 17.5%
+
+And from this, $probconv$, $probsen$, and $west$ show strong practical significance. 
+
+
+# Summary of Models
+```{r}
+(se.m1 = sqrt(diag(vcovHC(m1))))
+(se.m2 = sqrt(diag(vcovHC(m2))))
+(se.m3 = sqrt(diag(vcovHC(m3))))
+```
+```{r}
+stargazer(m1, m2, m3, type = "text", omit.stat = "f",
+          se = list(se.m1, se.m2, se.m3),
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+
+```{r}
+AIC(m1)
+AIC(m2)
+AIC(m3)
+```
+# Discussion of Causality
+
+# Conclusion
+
+Based on our best model, we have the following statiscally significant key variables of interest: probability of conviction, probability of sentencing, and police per capita. With all other variables controlled, an increase in the probability of conviction or probability of sentencing reduces the crime rate. Although we see thatan increase in police per capita causes an increase in the crime rate, we suspect that there is a reverse causality bias, whereas in real life the cause is the crime rate and police per capita is the effect. With this potential bias, we concluded that police per capita is not a good determinant for crime rate. 
+
+Relating our analysis results to our research question: we see that strict incapacitations through conviction and imprisonment was effective in reducing crime rate in 1988 for the North Carolina counties. The use of this finding to support current policy suggestion is subject to a few limitations: 1) our analysis was based on data taken in North Carolina and it's not representative of the situation for United States, 2) our analysis was based on data taken in 1988 and our analysis might not be pertinent to be applied to the model for 2017 and 3) our analysis was based on one sample of 90 observations which limits our capability to find conclusive enough evidences.
+
+# References:
+"Shattering "Broken Windows": An Analysis of San Francisco’s Alternative Crime Policies", CENTER ON JUVENILE AND CRIMINAL JUSTICE, October 1999 http://www.cjcj.org/uploads/cjcj/documents/shattering.pdf
+
+Jackman, Tom. “Nation's top cops, prosecutors urge Trump not to roll back successful crime policies.” The Washington Post, WP Company, 18 Oct. 2017, www.washingtonpost.com/news/true-crime/wp/2017/10/18/nations-top-cops-prosecutors-urge-trump-not-to-roll-back-successful-crime-policies/?utm_term=.53fb295eac1e.
